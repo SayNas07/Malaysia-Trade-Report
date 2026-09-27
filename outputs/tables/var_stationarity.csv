@@ -1,0 +1,15 @@
+variable,transform,adf_stat,adf_pvalue,adf_rejects_unit_root_5,kpss_stat,kpss_pvalue,kpss_rejects_stationarity_5,reading
+log_exports,level,-2.3804724928410015,0.3900505454535915,False,0.09434892728735425,0.1,False,"conflict: ADF unit root, KPSS stationary"
+log_exports,difference,-6.374623255005713,2.300032708716339e-08,True,0.05642449776628704,0.1,False,stationary
+log_imports,level,-2.0448006909278114,0.5768336354684432,False,0.10935663527968054,0.1,False,"conflict: ADF unit root, KPSS stationary"
+log_imports,difference,-5.272854568489876,6.230982734230429e-06,True,0.06071397422210675,0.1,False,stationary
+log_reer,level,-2.6397111753145257,0.2619564020522436,False,0.11499698419680258,0.1,False,"conflict: ADF unit root, KPSS stationary"
+log_reer,difference,-3.7305214473900796,0.003703759497951578,True,0.0945170273005019,0.1,False,stationary
+log_foreign_gdp,level,-2.9500287480325595,0.1465918319775884,False,0.07689731027311168,0.1,False,"conflict: ADF unit root, KPSS stationary"
+log_foreign_gdp,difference,-6.2772587794903165,3.873273129294345e-08,True,0.07401743710794405,0.1,False,stationary
+log_gdp_us,level,-3.9516766687944096,0.010287277649853597,True,0.0731815583388662,0.1,False,stationary
+log_gdp_us,difference,-7.739753034903195,1.0697316590884925e-11,True,0.1602655932959753,0.1,False,stationary
+log_gdp_china,level,-4.479904069914729,0.0016279021158827974,True,0.15596830597699488,0.04169307835250426,True,"conflict: ADF stationary, KPSS unit root"
+log_gdp_china,difference,-5.33974052378786,4.5277879259381375e-06,True,0.2596364750683405,0.1,False,stationary
+tpu,level,-2.002468204787683,0.285491927140542,False,0.1971861341010251,0.1,False,"conflict: ADF unit root, KPSS stationary"
+tpu,difference,-4.680435409680352,9.157017578979066e-05,True,0.18307359775986087,0.1,False,stationary

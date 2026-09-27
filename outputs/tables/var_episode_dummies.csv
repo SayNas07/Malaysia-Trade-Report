@@ -1,0 +1,10 @@
+episode,equation,estimate,std_error,pvalue,note
+GFC,exports,,,,Not estimated. The dummy does not vary in 2015Q1-2024Q1.
+GFC,imports,,,,Not estimated. The dummy does not vary in 2015Q1-2024Q1.
+GFC,REER,,,,Not estimated. The dummy does not vary in 2015Q1-2024Q1.
+COVID,REER,-0.00882009841318281,0.01206605116008716,0.46478851730493886,Shift in the quarterly log-difference while the dummy equals 1.
+COVID,exports,-0.06755074041426659,0.02147123373633103,0.0016546099827154936,Shift in the quarterly log-difference while the dummy equals 1.
+COVID,imports,-0.08130540049630447,0.023531595563215317,0.000549968709407711,Shift in the quarterly log-difference while the dummy equals 1.
+trade war,REER,-0.003341794083219705,0.007233416754812325,0.6440857279604453,Shift in the quarterly log-difference while the dummy equals 1.
+trade war,exports,-0.038234303664625706,0.012871682690076264,0.002973928545089599,Shift in the quarterly log-difference while the dummy equals 1.
+trade war,imports,-0.028410440233241255,0.014106838712691113,0.04401498863414033,Shift in the quarterly log-difference while the dummy equals 1.

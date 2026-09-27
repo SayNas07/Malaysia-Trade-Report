@@ -1,0 +1,41 @@
+flow,flow_label,year,rank,hs_code,hs_description,value_usd,share
+X,Exports,2000,1,85,"Electrical machinery and equipment and parts thereof; sound recorders and reproducers; television image and sound recorders and reproducers, parts and accessories of such articles",37648020040.0,0.3832650425700696
+X,Exports,2000,2,84,"Machinery and mechanical appliances, boilers, nuclear reactors; parts thereof",23061452061.0,0.23477060404493943
+X,Exports,2000,3,27,"Mineral fuels, mineral oils and products of their distillation; bituminous substances; mineral waxes",9449731073.0,0.09620032017941559
+X,Exports,2000,4,44,Wood and articles of wood; wood charcoal,3535331463.0,0.0359904441781104
+X,Exports,2000,5,15,"Animal, vegetable or microbial fats and oils and their cleavage products; prepared edible fats; animal or vegetable waxes",3199465117.0,0.032571251634630656
+X,Exports,2000,6,40,Rubber and articles thereof,1945325883.0,0.01980384112015717
+X,Exports,2000,7,39,Plastics and articles thereof,1894255068.0,0.019283929101828808
+X,Exports,2000,8,94,"Furniture; bedding, mattresses, mattress supports, cushions and similar stuffed furnishings; lamps and lighting fittings, n.e.c.; illuminated signs, illuminated name-plates and the like; prefabricated buildings",1654680543.0,0.01684500826548011
+X,Exports,2000,9,90,"Optical, photographic, cinematographic, measuring, checking, medical or surgical instruments and apparatus; parts and accessories",1566066808.0,0.015942901145876383
+X,Exports,2000,10,38,Chemical products n.e.c.,1115227652.0,0.011353260359109678
+M,Imports,2000,1,85,"Electrical machinery and equipment and parts thereof; sound recorders and reproducers; television image and sound recorders and reproducers, parts and accessories of such articles",37348806103.0,0.45571082586841843
+M,Imports,2000,2,84,"Machinery and mechanical appliances, boilers, nuclear reactors; parts thereof",11895750168.0,0.14514579444477127
+M,Imports,2000,3,27,"Mineral fuels, mineral oils and products of their distillation; bituminous substances; mineral waxes",3940605610.0,0.048081232690610126
+M,Imports,2000,4,39,Plastics and articles thereof,2439656133.0,0.029767423037254187
+M,Imports,2000,5,90,"Optical, photographic, cinematographic, measuring, checking, medical or surgical instruments and apparatus; parts and accessories",2289490606.0,0.027935180899783574
+M,Imports,2000,6,72,Iron and steel,2034077973.0,0.0248187679788279
+M,Imports,2000,7,87,"Vehicles; other than railway or tramway rolling stock, and parts and accessories thereof",1776281524.0,0.021673268967273174
+M,Imports,2000,8,29,Organic chemicals,1531798233.0,0.018690210227848312
+M,Imports,2000,9,71,"Natural, cultured pearls; precious, semi-precious stones; precious metals, metals clad with precious metal, and articles thereof; imitation jewellery; coin",1282326667.0,0.015646287135393264
+M,Imports,2000,10,99,Commodities not specified according to kind,1263583370.0,0.015417591114111851
+X,Exports,2025,1,85,"Electrical machinery and equipment and parts thereof; sound recorders and reproducers; television image and sound recorders and reproducers, parts and accessories of such articles",199678189023.452,0.4318867254436171
+X,Exports,2025,2,27,"Mineral fuels, mineral oils and products of their distillation; bituminous substances; mineral waxes",57431892996.436,0.12422023819209287
+X,Exports,2025,3,84,"Machinery and mechanical appliances, boilers, nuclear reactors; parts thereof",48064428559.846,0.10395921939472572
+X,Exports,2025,4,15,"Animal, vegetable or microbial fats and oils and their cleavage products; prepared edible fats; animal or vegetable waxes",22104520774.168,0.04781017466827377
+X,Exports,2025,5,90,"Optical, photographic, cinematographic, measuring, checking, medical or surgical instruments and apparatus; parts and accessories",19400254926.169,0.041961080545709774
+X,Exports,2025,6,39,Plastics and articles thereof,10303779715.512,0.02228618810491208
+X,Exports,2025,7,38,Chemical products n.e.c.,8502552531.791,0.018390288838388166
+X,Exports,2025,8,76,Aluminium and articles thereof,8380051629.374,0.018125329936930216
+X,Exports,2025,9,40,Rubber and articles thereof,7119528577.123,0.015398927138280344
+X,Exports,2025,10,18,Cocoa and cocoa preparations,6105867517.647,0.01320646556885285
+M,Imports,2025,1,85,"Electrical machinery and equipment and parts thereof; sound recorders and reproducers; television image and sound recorders and reproducers, parts and accessories of such articles",109835786931.874,0.3234515686145101
+M,Imports,2025,2,84,"Machinery and mechanical appliances, boilers, nuclear reactors; parts thereof",52632541319.186,0.15499573067581304
+M,Imports,2025,3,27,"Mineral fuels, mineral oils and products of their distillation; bituminous substances; mineral waxes",40825150663.801,0.12022455877081813
+M,Imports,2025,4,39,Plastics and articles thereof,9240690423.299,0.02721258613416252
+M,Imports,2025,5,87,"Vehicles; other than railway or tramway rolling stock, and parts and accessories thereof",8702288401.738,0.025627064845667142
+M,Imports,2025,6,90,"Optical, photographic, cinematographic, measuring, checking, medical or surgical instruments and apparatus; parts and accessories",8514471739.537,0.025073970124012027
+M,Imports,2025,7,71,"Natural, cultured pearls; precious, semi-precious stones; precious metals, metals clad with precious metal, and articles thereof; imitation jewellery; coin",8175381116.764,0.02407539400504247
+M,Imports,2025,8,72,Iron and steel,5818840336.305,0.017135699455247885
+M,Imports,2025,9,38,Chemical products n.e.c.,4997318922.936,0.014716429768862081
+M,Imports,2025,10,88,"Aircraft, spacecraft, and parts thereof",4930002931.395,0.01451819325902324

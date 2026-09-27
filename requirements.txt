@@ -1,0 +1,10 @@
+pandas
+numpy
+statsmodels
+matplotlib
+seaborn
+wbgapi
+comtradeapicall
+requests
+openpyxl
+python-dotenv

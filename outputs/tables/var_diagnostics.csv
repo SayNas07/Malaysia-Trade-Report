@@ -1,0 +1,5 @@
+test,lags,statistic,df,pvalue,crit_5,note
+Portmanteau,4.0,47.27445147450481,33,0.051266934183706446,47.39988391908093,
+Breusch-Godfrey LM,4.0,73.05401249050162,36,0.0002544466186384797,50.99846016571065,
+Jarque-Bera,,8.499943574773532,6,0.20371472499784563,12.591587243743977,
+Companion roots,,0.026714526567893304,2,,,"2 roots lie on the unit circle, against 2 expected for one cointegrating relation among three variables. The largest other modulus is 0.027."
