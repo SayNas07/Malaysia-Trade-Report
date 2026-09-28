@@ -1,4 +1,6 @@
 .env
+data/raw/
+data/processed/
 __pycache__/
 *.py[cod]
 .venv/
@@ -6,3 +8,5 @@ venv/
 env/
 .ipynb_checkpoints/
 *.egg-info/
+.DS_Store
+Thumbs.db
