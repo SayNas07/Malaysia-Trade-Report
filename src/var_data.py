@@ -12,6 +12,7 @@ weights. They are not model variables. The script does not fill gaps.
 
 from __future__ import annotations
 
+import csv
 import json
 import warnings
 from datetime import datetime
@@ -29,7 +30,7 @@ import requests
 import seaborn as sns
 from statsmodels.tsa.seasonal import STL
 from statsmodels.tsa.stattools import adfuller, kpss
-from statsmodels.tsa.vector_ar.vecm import coint_johansen
+from statsmodels.tsa.vector_ar.vecm import VECM, coint_johansen
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
@@ -42,7 +43,7 @@ LOG_PATH = RAW / "download_log.txt"
 # 2026Q3 is incomplete in the published TPU file (monthly data stop in August).
 DROP_FROM = pd.Period("2026Q3", freq="Q-DEC")
 WEIGHT_YEARS = range(2000, 2020)
-MAX_LAGS = 8
+MAX_LAGS = 12
 ADF_ALPHA = 0.05
 # A lag that leaves fewer residual degrees of freedom than this makes the
 # residual covariance close to singular, so AIC/BIC/HQ keep falling.
@@ -69,8 +70,16 @@ BIS_URL = (
 OECD_BASE = (
     "https://sdmx.oecd.org/public/rest/data/OECD.SDD.NAD,DSD_NAMAIN1@DF_QNA,1.0/"
 )
-OECD_US_JP = "Q.Y.USA+JPN.S1.S1.B1GQ._Z._Z._Z.XDC.L.N.T0102"
-OECD_CN = "Q.N.CHN.S1.S1.B1GQ._Z._Z._Z.XDC.Q.N.T0102"
+# Seasonally adjusted chain-linked volume. GY is year-on-year percent; G1 is
+# quarter-on-quarter percent. Both are percentage changes, not levels.
+OECD_CN_GY = "Q.Y.CHN.S1.S1.B1GQ._Z._Z._Z.PC.L.GY.T0102"
+OECD_CN_G1 = "Q.Y.CHN.S1.S1.B1GQ._Z._Z._Z.PC.L.G1.T0102"
+BEA_URL = "https://apps.bea.gov/national/Release/XLS/Survey/Section1All_xls.xlsx"
+# Cabinet Office, Apr-Jun 2026 first preliminary (17 Aug 2026), benchmark year 2020.
+JAPAN_URL = (
+    "https://www.esri.cao.go.jp/jp/sna/data/data_list/sokuhou/files/2026/qe262/"
+    "tables/gaku-jk2621.csv"
+)
 EUROSTAT_URL = (
     "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/namq_10_gdp/"
     "Q.CLV15_MEUR.SCA.B1GQ.EU27_2020?format=SDMX-CSV&startPeriod=2000"
@@ -91,14 +100,16 @@ def main() -> int:
     for folder in (RAW, PROCESSED, TABLES, FIGURES):
         folder.mkdir(parents=True, exist_ok=True)
 
-    exports, imports = load_malaysia_trade()
+    exports, imports, exports_usd, imports_usd = load_malaysia_trade()
     reer = load_reer()
     gdp = load_partner_gdp()
     tpu = load_tpu()
     weights = export_weights()
     commodity = load_commodity()
+    print_source_spans(exports, imports, reer, gdp, tpu)
 
     frame = build_frame(exports, imports, reer, gdp, tpu, weights, commodity)
+    frame = attach_usd(frame, exports_usd, imports_usd)
     out = PROCESSED / "var_quarterly.csv"
     frame.to_csv(out, index=False)
     weights.to_csv(PROCESSED / "var_export_weights.csv", index=False)
@@ -109,7 +120,7 @@ def main() -> int:
     stationarity = stationarity_table(frame, level_cols)
     stationarity.to_csv(TABLES / "var_stationarity.csv", index=False)
 
-    endogenous = ["log_exports", "log_imports", "log_reer"]
+    endogenous = ["log_reer", "log_exports", "log_imports"]
     exog = baseline_exog(frame)
     y = frame.set_index("quarter")[endogenous].astype(float)
     y.index = pd.PeriodIndex(y.index, freq="Q-DEC")
@@ -124,20 +135,17 @@ def main() -> int:
 
     orders = integration_orders(stationarity, endogenous)
     johansen = None
+    spec = None
     if all(orders[name] == "I(1)" for name in endogenous):
-        p_levels = chosen_lag(level_lags, "bic", MIN_RESIDUAL_DF)
-        johansen = johansen_table(y, max(p_levels - 1, 0))
-        johansen["lag_basis"] = "bic"
-        p_hq = chosen_lag(level_lags, "hq", MIN_RESIDUAL_DF)
-        if p_hq != p_levels:
-            extra = johansen_table(y, max(p_hq - 1, 0))
-            extra["lag_basis"] = "hq"
-            johansen = pd.concat([johansen, extra], ignore_index=True)
+        spec, johansen = choose_specification(y, x, level_lags)
         johansen.to_csv(TABLES / "var_johansen.csv", index=False)
+        pd.DataFrame([spec]).to_csv(TABLES / "var_specification.csv", index=False)
     else:
         print("\nJohansen test skipped: the three endogenous series are not all I(1).")
 
-    print_recommendation(frame, weights, orders, level_lags, diff_lags, johansen, commodity is not None)
+    print_recommendation(
+        frame, weights, orders, level_lags, diff_lags, johansen, commodity is not None, spec
+    )
     print_manual_gaps(frame)
     print(f"\nWrote {out.relative_to(ROOT).as_posix()} ({len(frame)} quarters).")
     return 0
@@ -164,7 +172,13 @@ def fetch(url: str, dest: Path, source: str) -> bytes:
             f"{source} returned HTTP {response.status_code}.\nURL: {url}\n"
             f"Save the file manually as {dest.relative_to(ROOT).as_posix()}."
         )
-    dest.write_bytes(response.content)
+    try:
+        dest.write_bytes(response.content)
+    except OSError as exc:
+        print(
+            f"Could not replace {dest.name} ({exc}). The new download is used from memory "
+            "and the file already on disk was left unchanged."
+        )
     return response.content
 
 
@@ -180,7 +194,7 @@ def quarter_range(series: pd.Series) -> str:
     return f"{series.index.min()} to {series.index.max()}"
 
 
-def require_regular(series: pd.Series, name: str) -> pd.Series:
+def require_regular(series: pd.Series, name: str, positive: bool = True) -> pd.Series:
     series = series.sort_index()
     series = series[~series.index.duplicated(keep="last")]
     full = pd.period_range(series.index.min(), series.index.max(), freq="Q-DEC")
@@ -191,7 +205,7 @@ def require_regular(series: pd.Series, name: str) -> pd.Series:
             f"{name} has {len(missing)} missing quarter(s) ({shown}). "
             "Those quarters were not interpolated."
         )
-    if (series <= 0).any():
+    if positive and (series <= 0).any():
         raise DownloadError(f"{name} has a non-positive value, so it cannot be logged.")
     return series.astype(float)
 
@@ -209,44 +223,161 @@ def stl_adjust(series: pd.Series, name: str) -> pd.Series:
     return adjusted
 
 
-def load_malaysia_trade() -> tuple[pd.Series, pd.Series]:
-    dest = RAW / "dosm_gdp_qtr_real_sa_demand.csv"
-    fetch(DOSM_URL, dest, "DOSM real SA GDP by expenditure")
-    frame = pd.read_csv(dest)
-    needed = {"series", "date", "type", "value"}
-    if not needed.issubset(frame.columns):
-        raise DownloadError(f"DOSM file is missing columns: {sorted(needed - set(frame.columns))}")
+def load_malaysia_trade() -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """CPI-deflated nominal goods trade. DOSM monthly trade starts in 2000, so no splice."""
+    trade_path = RAW / "mys_trade_monthly_dosm.csv"
+    cpi_path = RAW / "mys_cpi_monthly.csv"
+    fx_path = RAW / "myr_usd_fred.csv"
+    us_cpi_path = RAW / "us_cpi_fred.csv"
+    for path in (trade_path, cpi_path, fx_path, us_cpi_path):
+        if not path.exists():
+            raise DownloadError(f"Missing {path.relative_to(ROOT).as_posix()}.")
+
+    trade = pd.read_csv(trade_path)
+    needed = {"series", "date", "exports", "imports"}
+    if not needed.issubset(trade.columns):
+        raise DownloadError(
+            "mys_trade_monthly_dosm.csv is missing columns: "
+            + ", ".join(sorted(needed - set(trade.columns)))
+        )
+    levels = trade.loc[trade["series"] == "abs", ["date", "exports", "imports"]].copy()
+    if levels.empty:
+        raise DownloadError("mys_trade_monthly_dosm.csv has no series=='abs' rows.")
+    levels["month"] = pd.PeriodIndex(pd.to_datetime(levels["date"]), freq="M")
+    levels = levels.drop_duplicates("month").set_index("month").sort_index()
+    if levels.index.min() > pd.Period("2000-01", freq="M"):
+        raise DownloadError(
+            f"DOSM monthly goods trade starts in {levels.index.min()}, after 2000-01. "
+            "A BNM splice was not applied because that case was not reached."
+        )
+    print(
+        f"DOSM nominal goods trade starts in {levels.index.min()}, so it is used alone. "
+        "BNM nominal trade was not spliced."
+    )
+
+    cpi = pd.read_csv(cpi_path)
+    if not {"date", "division", "index"}.issubset(cpi.columns):
+        raise DownloadError("mys_cpi_monthly.csv needs columns date, division, index.")
+    overall = cpi.loc[cpi["division"] == "overall", ["date", "index"]].copy()
+    if overall.empty:
+        raise DownloadError("mys_cpi_monthly.csv has no division=='overall' rows.")
+    overall["month"] = pd.PeriodIndex(pd.to_datetime(overall["date"]), freq="M")
+    overall = overall.drop_duplicates("month").set_index("month")["index"].astype(float).sort_index()
+
+    fx = _fred_monthly(fx_path, "EXMAUS", "myr_usd_fred.csv")
+    us_cpi = _fred_monthly(us_cpi_path, "CPIAUCSL", "us_cpi_fred.csv")
+
+    exports = _deflate_and_adjust(levels["exports"], overall, "CPI-deflated exports")
+    imports = _deflate_and_adjust(levels["imports"], overall, "CPI-deflated imports")
+    exports_usd = _deflate_and_adjust(
+        levels["exports"] / fx, us_cpi, "USD CPI-deflated exports", allow_gap=True
+    )
+    imports_usd = _deflate_and_adjust(
+        levels["imports"] / fx, us_cpi, "USD CPI-deflated imports", allow_gap=True
+    )
+    compare_with_national_accounts(exports, imports)
+    log_download(
+        "OpenDOSM monthly goods trade, deflated by headline CPI, summed to quarters, then STL",
+        trade_path,
+        quarter_range(exports),
+        len(exports),
+        "Nominal RM goods exports and imports divided by CPI division 'overall'. "
+        "Not national-accounts goods and services, and the CPI is not a trade price index.",
+    )
+    return exports, imports, exports_usd, imports_usd
+
+
+def _fred_monthly(path: Path, column: str, label: str) -> pd.Series:
+    frame = pd.read_csv(path)
+    if "observation_date" not in frame.columns or column not in frame.columns:
+        raise DownloadError(f"{label} needs columns observation_date and {column}.")
+    frame = frame.copy()
+    frame["month"] = pd.PeriodIndex(pd.to_datetime(frame["observation_date"]), freq="M")
+    series = frame.drop_duplicates("month").set_index("month")[column].astype(float).sort_index()
+    return series
+
+
+def _deflate_and_adjust(
+    nominal: pd.Series, price: pd.Series, name: str, allow_gap: bool = False
+) -> pd.Series:
+    aligned = pd.concat(
+        [nominal.rename("nominal"), price.rename("price")], axis=1, join="inner"
+    ).dropna()
+    if (aligned["price"] <= 0).any() or (aligned["nominal"] <= 0).any():
+        raise DownloadError(f"{name} has a non-positive nominal value or price.")
+    real = aligned["nominal"] / aligned["price"]
+    quarterly = _quarterly_sum(real, name)
+    if allow_gap:
+        quarterly = _longest_prefix(quarterly, name)
+    return stl_adjust(quarterly, name)
+
+
+def _quarterly_sum(monthly: pd.Series, name: str) -> pd.Series:
+    frame = monthly.rename("value").to_frame()
+    frame["quarter"] = pd.PeriodIndex(frame.index.to_timestamp(), freq="Q-DEC")
+    grouped = frame.groupby("quarter")["value"]
+    total = grouped.sum()
+    complete = grouped.count() == 3
+    dropped = [str(quarter) for quarter in total.index[~complete] if quarter < DROP_FROM and quarter >= pd.Period("2000Q1", freq="Q-DEC")]
+    total = total.loc[complete]
+    total = total[(total.index >= pd.Period("2000Q1", freq="Q-DEC")) & (total.index < DROP_FROM)]
+    if dropped:
+        print(f"{name}: incomplete quarters left out ({', '.join(dropped)}). No month was filled in.")
+    return total.sort_index()
+
+
+def _longest_prefix(series: pd.Series, name: str) -> pd.Series:
+    """Keep the continuous run from the first quarter. Later pieces after a gap are left out."""
+    full = pd.period_range(series.index.min(), series.index.max(), freq="Q-DEC")
+    missing = full.difference(series.index)
+    if len(missing) == 0:
+        return series
+    first_gap = missing.min()
+    kept = series[series.index < first_gap]
+    print(
+        f"{name}: stopped before {first_gap} because that quarter is incomplete. "
+        f"Kept {kept.index.min()} to {kept.index.max()}. Later quarters were not joined across the gap."
+    )
+    return kept
+
+
+def compare_with_national_accounts(exports: pd.Series, imports: pd.Series) -> None:
+    path = RAW / "dosm_gdp_qtr_real_sa_demand.csv"
+    if not path.exists():
+        print("National-accounts comparison skipped: dosm_gdp_qtr_real_sa_demand.csv is missing.")
+        return
+    frame = pd.read_csv(path)
     levels = frame.loc[frame["series"] == "abs", ["date", "type", "value"]]
     wide = levels.pivot(index="date", columns="type", values="value")
-    for code in ("e0", "e1", "e2", "e3", "e5", "e6"):
-        if code not in wide.columns:
-            raise DownloadError(f"DOSM file has no expenditure type {code}.")
-    check = wide.loc["2015-01-01"]
-    implied = check["e1"] + check["e2"] + check["e3"] + check["e5"] - check["e6"]
-    gap = abs(implied - check["e0"]) / check["e0"]
-    if gap > 0.03:
-        raise DownloadError(
-            "DOSM type codes no longer match the expenditure identity "
-            f"(gap {gap:.1%} in 2015Q1). e5 and e6 were not labelled."
-        )
-    # e0 GDP, e1 private consumption, e2 government consumption, e3 GFCF,
-    # e5 exports of goods and services, e6 imports. The SA file omits
-    # inventories; the 2015Q1 residual is that omitted item.
+    if "e5" not in wide.columns or "e6" not in wide.columns:
+        raise DownloadError("DOSM national-accounts file has no e5 or e6 column for the growth check.")
     wide.index = pd.PeriodIndex(pd.to_datetime(wide.index), freq="Q-DEC")
-    exports = require_regular(wide["e5"].dropna(), "Malaysia real exports")
-    imports = require_regular(wide["e6"].dropna(), "Malaysia real imports")
-    exports, imports = prepend_historical_trade(exports, imports)
-    exports = require_regular(exports[exports.index < DROP_FROM], "Malaysia real exports")
-    imports = require_regular(imports[imports.index < DROP_FROM], "Malaysia real imports")
-    log_download(
-        "DOSM gdp_qtr_real_sa_demand, constant 2015 prices, seasonally adjusted",
-        dest,
-        f"{exports.index.min()} to {exports.index.max()}",
-        int(exports.shape[0]),
-        "e5 exports and e6 imports of goods and services, RM million. "
-        f"2015Q1 expenditure identity residual {gap:.2%}.",
-    )
-    return exports, imports
+    rows = []
+    for label, built, code in (
+        ("exports", exports, "e5"),
+        ("imports", imports, "e6"),
+    ):
+        official = wide[code].dropna().astype(float)
+        official = official[(official.index >= pd.Period("2015Q1", freq="Q-DEC")) & (official.index < DROP_FROM)]
+        both = pd.concat(
+            [built.rename("built"), official.rename("official")], axis=1, join="inner"
+        ).dropna()
+        growth = np.log(both).diff().dropna()
+        corr = float(growth["built"].corr(growth["official"]))
+        rows.append(
+            {
+                "flow": label,
+                "start": str(growth.index.min()),
+                "end": str(growth.index.max()),
+                "quarters": int(len(growth)),
+                "growth_correlation": corr,
+            }
+        )
+        print(
+            f"Quarterly growth correlation, CPI-deflated goods {label} vs DOSM constant-2015 "
+            f"SA goods and services, {growth.index.min()} to {growth.index.max()}: {corr:.3f}."
+        )
+    pd.DataFrame(rows).to_csv(TABLES / "var_trade_deflator_check.csv", index=False)
 
 
 def prepend_historical_trade(
@@ -324,25 +455,9 @@ def series_from_oecd(frame: pd.DataFrame, area: str, name: str) -> pd.Series:
 
 
 def load_partner_gdp() -> dict[str, pd.Series]:
-    us_jp = oecd_frame(
-        OECD_US_JP,
-        RAW / "oecd_qna_usa_jpn_gdp.csv",
-        "OECD QNA real SA GDP, United States and Japan, national currency, chain-linked volume",
-    )
-    china = oecd_frame(
-        OECD_CN,
-        RAW / "oecd_qna_chn_gdp_nsa.csv",
-        "OECD QNA China real GDP, national currency, constant prices, not seasonally adjusted",
-    )
-    united_states = require_regular(series_from_oecd(us_jp, "USA", "US real GDP"), "US real GDP")
-    japan = require_regular(series_from_oecd(us_jp, "JPN", "Japan real GDP"), "Japan real GDP")
-    china_nsa = require_regular(series_from_oecd(china, "CHN", "China real GDP"), "China real GDP")
-    if _looks_cumulative(china_nsa):
-        raise DownloadError(
-            "China's OECD constant-price series looks cumulative within the year. "
-            "It was not differenced or seasonally adjusted."
-        )
-    china_sa = stl_adjust(china_nsa, "China real GDP")
+    united_states = load_us_gdp()
+    japan = load_japan_gdp()
+    china_sa = load_china_gdp()
 
     eurostat = fetch(EUROSTAT_URL, RAW / "eurostat_eu27_gdp_sa.csv", "Eurostat EU27 real SA GDP")
     euro_frame = pd.read_csv(StringIO(eurostat.decode("utf-8-sig")))
@@ -384,6 +499,314 @@ def load_partner_gdp() -> dict[str, pd.Series]:
         "SGP": singapore,
         "EU27": europe,
     }
+
+
+def load_us_gdp() -> pd.Series:
+    dest = RAW / "bea_section1.xlsx"
+    fetch(BEA_URL, dest, "BEA NIPA Section 1")
+    sheet = pd.read_excel(dest, sheet_name="T10106-Q", header=None)
+    header = None
+    values = None
+    for row in sheet.itertuples(index=False):
+        cells = list(row)
+        if header is None and any(cell == "1947Q1" for cell in cells):
+            header = cells
+        if any(cell == "A191RX" for cell in cells):
+            values = cells
+            break
+    if header is None or values is None:
+        raise DownloadError("BEA Table 1.1.6 has no A191RX real GDP row.")
+    records = []
+    for label, value in zip(header, values):
+        text = str(label)
+        if len(text) == 6 and text[4] == "Q" and text[:4].isdigit():
+            records.append((pd.Period(text, freq="Q-DEC"), float(value)))
+    series = pd.Series({quarter: value for quarter, value in records}).sort_index()
+    series = require_regular(series[series.index < DROP_FROM], "US real GDP")
+    log_download(
+        "BEA NIPA Table 1.1.6 line 1, real GDP, millions of chained 2017 dollars, SAAR",
+        dest,
+        quarter_range(series),
+        len(series),
+        "Code A191RX. Already seasonally adjusted.",
+    )
+    return series
+
+
+def load_japan_gdp() -> pd.Series:
+    dest = RAW / "esri_japan_real_sa.csv"
+    payload = fetch(JAPAN_URL, dest, "Cabinet Office Japan real SA GDP")
+    text = payload.decode("cp932")
+    year = None
+    records = []
+    for cells in csv.reader(StringIO(text)):
+        if not cells or not str(cells[0]).strip():
+            continue
+        label = str(cells[0]).strip()
+        if "/" in label and label[:4].isdigit():
+            year = int(label[:4])
+            quarter = _japan_quarter(label.split("/", 1)[1])
+        elif year is not None and label[0].isdigit():
+            quarter = _japan_quarter(label)
+        else:
+            continue
+        raw_value = str(cells[1]).replace(",", "").strip() if len(cells) > 1 else ""
+        if quarter is None or not raw_value:
+            continue
+        records.append((pd.Period(f"{year}Q{quarter}", freq="Q-DEC"), float(raw_value)))
+    if not records:
+        raise DownloadError("Cabinet Office real SA GDP file has no quarterly GDP column.")
+    series = pd.Series({quarter: value for quarter, value in records}).sort_index()
+    series = require_regular(series[series.index < DROP_FROM], "Japan real GDP")
+    log_download(
+        "Cabinet Office ESRI gaku-jk2621, real seasonally adjusted GDP, billions of chained 2020 yen",
+        dest,
+        quarter_range(series),
+        len(series),
+        "Apr-Jun 2026 first preliminary, published 17 Aug 2026. Already seasonally adjusted.",
+    )
+    return series
+
+
+def _japan_quarter(label: str) -> int | None:
+    part = label.replace(".", "").strip()
+    if part.startswith("10"):
+        return 4
+    if part.startswith("7"):
+        return 3
+    if part.startswith("4"):
+        return 2
+    if part.startswith("1"):
+        return 1
+    return None
+
+
+def load_china_gdp() -> pd.Series:
+    """Index of official seasonally adjusted real GDP growth, 2011Q1 = 100.
+
+    Quarter-on-quarter growth is published from 2011Q1. Year-on-year growth
+    is published from 1993Q1. The index uses the quarter-on-quarter rates
+    from 2011Q2 onward, then steps back four quarters at a time with the
+    year-on-year rates. No annual figure is split into quarters.
+    """
+    yoy_frame = oecd_frame(
+        OECD_CN_GY,
+        RAW / "oecd_qna_chn_gdp_gy.csv",
+        "OECD QNA China real GDP, seasonally adjusted chain-linked volume, year-on-year percent",
+    )
+    qoq_frame = oecd_frame(
+        OECD_CN_G1,
+        RAW / "oecd_qna_chn_gdp_g1.csv",
+        "OECD QNA China real GDP, seasonally adjusted chain-linked volume, quarter-on-quarter percent",
+    )
+    yoy = series_from_oecd(yoy_frame, "CHN", "China real GDP year-on-year growth")
+    qoq = series_from_oecd(qoq_frame, "CHN", "China real GDP quarter-on-quarter growth")
+    yoy = require_regular(yoy, "China year-on-year real GDP growth", positive=False)
+    qoq = require_regular(qoq, "China quarter-on-quarter real GDP growth", positive=False)
+    if (1 + yoy / 100 <= 0).any() or (1 + qoq / 100 <= 0).any():
+        raise DownloadError("A China growth rate is at or below -100%. The index was not built.")
+    anchor = qoq.index.min()
+    index = pd.Series(index=pd.period_range(yoy.index.min(), qoq.index.max(), freq="Q-DEC"), dtype=float)
+    index.loc[anchor] = 100.0
+    for quarter in index.loc[anchor + 1 :].index:
+        index.loc[quarter] = index.loc[quarter - 1] * (1 + qoq.loc[quarter] / 100)
+    quarter = anchor - 1
+    while quarter >= index.index.min():
+        ahead = quarter + 4
+        if ahead not in yoy.index:
+            raise DownloadError(
+                f"China year-on-year growth is missing in {ahead}, so the index "
+                f"was not built back through {quarter}."
+            )
+        index.loc[quarter] = index.loc[ahead] / (1 + yoy.loc[ahead] / 100)
+        quarter -= 1
+    if index.isna().any():
+        raise DownloadError("The China real GDP index has a gap. It was not interpolated.")
+    overlap = []
+    for quarter in qoq.index:
+        previous = quarter - 4
+        if previous >= anchor and previous in index.index:
+            implied = (index.loc[quarter] / index.loc[previous] - 1) * 100
+            overlap.append(implied - yoy.loc[quarter])
+    gap = float(np.max(np.abs(overlap))) if overlap else float("nan")
+    nbs = load_nbs_yoy()
+    overlap_rows = []
+    for quarter in index.index:
+        previous = quarter - 4
+        if previous not in index.index or quarter not in nbs.index:
+            continue
+        if quarter > pd.Period("2024Q1", freq="Q-DEC"):
+            continue
+        implied = 100 * index.loc[quarter] / index.loc[previous]
+        overlap_rows.append(
+            {
+                "quarter": str(quarter),
+                "index_yoy": implied,
+                "nbs_preceding_year": float(nbs.loc[quarter]),
+                "difference_points": implied - float(nbs.loc[quarter]),
+            }
+        )
+    overlap_table = pd.DataFrame(overlap_rows)
+    if overlap_table.empty:
+        raise DownloadError("The China index and the NBS growth file have no overlapping year-on-year quarter.")
+    overlap_table.to_csv(TABLES / "var_china_overlap.csv", index=False)
+    max_row = overlap_table.loc[overlap_table["difference_points"].abs().idxmax()]
+    print(
+        "China overlap, existing index year-on-year versus NBS preceding-year index, "
+        f"{overlap_table['quarter'].iloc[0]} to {overlap_table['quarter'].iloc[-1]}: "
+        f"mean absolute difference {overlap_table['difference_points'].abs().mean():.2f} points, "
+        f"largest {max_row['difference_points']:+.2f} in {max_row['quarter']}."
+    )
+    last = index.index.max()
+    for quarter in pd.period_range(last + 1, nbs.index.max(), freq="Q-DEC"):
+        if quarter >= DROP_FROM:
+            break
+        base = quarter - 4
+        if base not in index.index or quarter not in nbs.index:
+            raise DownloadError(
+                f"Cannot extend the China index to {quarter}: the base quarter or the NBS rate is missing."
+            )
+        index.loc[quarter] = index.loc[base] * (nbs.loc[quarter] / 100.0)
+    index = require_regular(index[index.index >= pd.Period("2000Q1", freq="Q-DEC")], "China real GDP index")
+    log_download(
+        "China real GDP index from OECD QNA SA chain-linked growth, 2011Q1=100",
+        RAW / "oecd_qna_chn_gdp_g1.csv",
+        quarter_range(index),
+        len(index),
+        "Chained on OECD quarter-on-quarter growth from 2011Q2, extended back to 2000Q1 "
+        f"with OECD year-on-year growth, then extended past 2024Q1 with NBS current-quarter "
+        f"preceding-year indices. Largest OECD quarter-on-quarter versus year-on-year gap "
+        f"after 2011 is {gap:.2f} percentage points. "
+        f"Largest NBS overlap gap is {float(max_row['difference_points']):+.2f} points "
+        f"in {max_row['quarter']}. Not a yuan level, and not an interpolation of annual GDP.",
+    )
+    return index
+
+
+def load_nbs_yoy() -> pd.Series:
+    """NBS current-quarter real GDP index, preceding year = 100. 104.3 means 4.3% y/y."""
+    xlsx = RAW / "china_gdp_growth_nbs.xlsx"
+    csv_path = RAW / "china_gdp_growth_nbs.csv"
+    if xlsx.exists():
+        frame = pd.read_excel(xlsx, header=None)
+        header = None
+        values = None
+        for row in frame.itertuples(index=False):
+            cells = ["" if pd.isna(cell) else str(cell).strip() for cell in row]
+            joined = " ".join(cells)
+            if header is None and any(cell.startswith("2Q") or cell.startswith("1Q") for cell in cells):
+                header = cells
+            if "Gross Domestic Product" in joined and "Current Quarter" in joined and "Accumulated" not in joined:
+                values = cells
+        if header is None or values is None:
+            raise DownloadError(
+                "china_gdp_growth_nbs.xlsx has no 'Indices of Gross Domestic Product, Current Quarter' row."
+            )
+        pairs = list(zip(header, values))
+    elif csv_path.exists():
+        lines = csv_path.read_text(encoding="utf-8-sig").splitlines()
+        header = None
+        values = None
+        for line in lines:
+            parts = [part.strip() for part in line.split("\t,")]
+            if parts and parts[0] == "Indicators":
+                header = parts
+            name = parts[0] if parts else ""
+            if (
+                name.startswith("Indices of Gross Domestic Product")
+                and "Current Quarter" in name
+                and "Accumulated" not in name
+            ):
+                values = parts
+        if header is None or values is None:
+            raise DownloadError(
+                "china_gdp_growth_nbs.csv has no GDP current-quarter row. "
+                "Expected a line starting 'Indices of Gross Domestic Product (preceding year=100) , Current Quarter'."
+            )
+        print("China growth file used: data/raw/china_gdp_growth_nbs.csv (the xlsx name was not in data/raw).")
+        pairs = list(zip(header[1:], values[1:]))
+    else:
+        raise DownloadError("Missing data/raw/china_gdp_growth_nbs.xlsx.")
+
+    records = []
+    for label, value in pairs:
+        label = str(label).strip().strip(",")
+        value = str(value).strip().strip(",")
+        if not label or not value or value.lower() == "nan":
+            continue
+        pieces = label.replace("Q", " Q").split()
+        if len(pieces) < 2 or not pieces[-1].isdigit():
+            continue
+        quarter_number = pieces[0].replace("Q", "")
+        if quarter_number not in {"1", "2", "3", "4"}:
+            raise DownloadError(f"Unrecognised NBS quarter label: {label}")
+        if value == "":
+            raise DownloadError(f"NBS GDP growth is blank in {label}. It was not interpolated.")
+        records.append((pd.Period(f"{pieces[-1]}Q{quarter_number}", freq="Q-DEC"), float(value)))
+    if not records:
+        raise DownloadError("The NBS GDP current-quarter row did not parse into quarters.")
+    series = pd.Series({quarter: value for quarter, value in records}).sort_index()
+    series = series[series.index < DROP_FROM]
+    series = require_regular(series, "NBS China real GDP year-on-year index", positive=False)
+    if (series <= 0).any():
+        raise DownloadError("An NBS preceding-year index is not positive, so it cannot be chained.")
+    log_download(
+        "NBS indices of GDP, preceding year=100, current quarter",
+        csv_path if not xlsx.exists() else xlsx,
+        quarter_range(series),
+        len(series),
+        "104.3 means real GDP is 4.3% above the same quarter a year earlier.",
+    )
+    return series
+
+
+def attach_usd(
+    frame: pd.DataFrame, exports_usd: pd.Series, imports_usd: pd.Series
+) -> pd.DataFrame:
+    quarters = pd.PeriodIndex(frame["quarter"], freq="Q-DEC")
+    out = frame.copy()
+    out["exports_real_usd_sa"] = exports_usd.reindex(quarters).to_numpy()
+    out["imports_real_usd_sa"] = imports_usd.reindex(quarters).to_numpy()
+    out["log_exports_usd"] = np.log(out["exports_real_usd_sa"])
+    out["log_imports_usd"] = np.log(out["imports_real_usd_sa"])
+    missing = int(out["log_exports_usd"].isna().sum())
+    if missing:
+        print(
+            f"USD CPI-deflated trade is missing in {missing} estimation quarter(s). "
+            "Those quarters stay in the main file and are left out of that robustness check."
+        )
+    return out
+
+
+def print_source_spans(
+    exports: pd.Series,
+    imports: pd.Series,
+    reer: pd.Series,
+    gdp: dict[str, pd.Series],
+    tpu: pd.Series,
+) -> None:
+    spans = {
+        "exports_real_sa": exports,
+        "imports_real_sa": imports,
+        "reer_sa": reer,
+        "gdp_us": gdp["USA"],
+        "gdp_china_sa": gdp["CHN"],
+        "gdp_singapore": gdp["SGP"],
+        "gdp_japan": gdp["JPN"],
+        "gdp_eu27": gdp["EU27"],
+        "tpu": tpu,
+    }
+    print()
+    print("Source spans, first to last non-missing quarter:")
+    for name, series in spans.items():
+        print(f"  {name}: {series.index.min()} to {series.index.max()} ({len(series)} quarters)")
+    start = max(series.index.min() for series in spans.values())
+    end = min(series.index.max() for series in spans.values())
+    starters = [name for name, series in spans.items() if series.index.min() == start]
+    enders = [name for name, series in spans.items() if series.index.max() == end]
+    print(f"Common sample: {start} to {end}.")
+    print("Truncates the start: " + ", ".join(starters) + ".")
+    print("Truncates the end: " + ", ".join(enders) + ".")
 
 
 def _looks_cumulative(series: pd.Series) -> bool:
@@ -544,17 +967,23 @@ def build_frame(
 def write_sources(frame: pd.DataFrame) -> None:
     start, end = frame["quarter"].iloc[0], frame["quarter"].iloc[-1]
     rows = [
-        ("exports_real_sa", "DOSM gdp_qtr_real_sa_demand type e5", "RM million, constant 2015, already SA", "used as published"),
-        ("imports_real_sa", "DOSM gdp_qtr_real_sa_demand type e6", "RM million, constant 2015, already SA", "used as published"),
+        ("exports_real_sa", "OpenDOSM monthly goods exports, deflated by headline CPI, then STL", "nominal RM / CPI index, quarterly sum", "STL"),
+        ("imports_real_sa", "OpenDOSM monthly goods imports, deflated by headline CPI, then STL", "nominal RM / CPI index, quarterly sum", "STL"),
+        ("exports_real_usd_sa", "Same goods trade in USD (EXMAUS), deflated by US CPI, then STL", "USD / CPIAUCSL, quarterly sum", "STL; 2025Q4 left out where US CPI is missing"),
         ("reer_sa", "BIS broad real effective exchange rate, Malaysia", "index, 2020=100 in the monthly source", "quarterly mean, then STL"),
-        ("gdp_us", "OECD QNA, USA, B1GQ, XDC, chain-linked volume, SA", "national currency", "already SA"),
-        ("gdp_japan", "OECD QNA, JPN, B1GQ, XDC, chain-linked volume, SA", "national currency", "already SA"),
-        ("gdp_china_sa", "OECD QNA, CHN, B1GQ, XDC, constant prices, NSA", "million CNY", "STL"),
+        ("gdp_us", "BEA NIPA Table 1.1.6 line 1, A191RX", "millions of chained 2017 dollars, SAAR", "already SA"),
+        ("gdp_japan", "Cabinet Office ESRI gaku-jk2621, Apr-Jun 2026 first preliminary", "billions of chained 2020 yen", "already SA"),
+        ("gdp_china_sa", "OECD QNA SA growth index through 2024Q1, then NBS y/y indices", "index, 2011Q1=100, not yuan", "official growth rates, not STL"),
         ("gdp_singapore", "SingStat M015662 total GDP", "million chained 2015 SGD, already SA", "already SA"),
         ("gdp_eu27", "Eurostat namq_10_gdp EU27_2020 B1GQ CLV15_MEUR SCA", "million chain-linked 2015 euros, SA", "already SA"),
         ("foreign_gdp_index", "Fixed 2000-2019 COMTRADE export-share weights", "100 in the first estimation quarter", "weighted sum of log real GDP"),
         ("tpu", "Caldara-Iacoviello tpuq_published", "index", "official quarterly series, not re-averaged"),
-        ("dummy_gfc", "2008Q4-2009Q2", "0/1", "zero throughout a sample that starts in 2015"),
+        (
+            "dummy_gfc",
+            "2008Q4-2009Q2",
+            "0/1",
+            "zero throughout this sample" if frame["dummy_gfc"].nunique() < 2 else "varies in this sample",
+        ),
         ("dummy_covid", "2020Q1-2020Q3", "0/1", ""),
         ("dummy_trade_war", "2018Q3 onward", "0/1 step", ""),
     ]
@@ -678,7 +1107,7 @@ def integration_orders(table: pd.DataFrame, names: list[str]) -> dict[str, str]:
 
 
 def baseline_exog(frame: pd.DataFrame) -> list[str]:
-    columns = ["log_foreign_gdp", "tpu", "dummy_covid", "dummy_trade_war"]
+    columns = ["log_foreign_gdp", "tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"]
     if "log_commodity" in frame.columns:
         columns.insert(2, "log_commodity")
     varying = [column for column in columns if frame[column].nunique() > 1]
@@ -750,6 +1179,98 @@ def chosen_lag(table: pd.DataFrame, criterion: str = "bic", min_df: int | None =
     return int(usable.loc[usable[criterion].idxmin(), "lag"])
 
 
+def choose_specification(
+    y: pd.DataFrame, exog: pd.DataFrame, level_lags: pd.DataFrame
+) -> tuple[dict, pd.DataFrame]:
+    """Smallest lag that clears residual serial correlation, not the BIC lag."""
+    from var_model import breusch_godfrey
+
+    usable = level_lags.loc[level_lags["residual_df"] >= MIN_RESIDUAL_DF]
+    if usable.empty:
+        usable = level_lags
+    bic_lag = int(usable.loc[usable["bic"].idxmin(), "lag"])
+    rows = []
+    johansen_parts = []
+    frame = y.copy()
+    for column in exog.columns:
+        frame[column] = exog[column]
+    for lag in usable["lag"].astype(int):
+        johansen = johansen_table(y, lag - 1)
+        rank = cointegrating_rank(johansen, "trace_rejects_5")
+        johansen["lag_basis"] = "serial" if lag != bic_lag else "bic"
+        if lag == bic_lag:
+            johansen_parts.append(johansen.assign(lag_basis="bic"))
+        equations = y.shape[1]
+        test_lags = 4
+        if equations**2 * (test_lags - lag + 1) - equations * int(rank) <= 0:
+            test_lags = lag
+        deterministic = "ci" if int(rank) >= 1 else "co"
+        try:
+            fitted = VECM(
+                y,
+                exog=exog.to_numpy(dtype=float),
+                k_ar_diff=lag - 1,
+                coint_rank=int(rank),
+                deterministic=deterministic,
+            ).fit()
+            white = fitted.test_whiteness(nlags=test_lags, signif=0.05, adjusted=True)
+            _, _, bg_p = breusch_godfrey(frame, list(exog.columns), fitted, test_lags)
+            port_p = float(white.pvalue)
+        except (np.linalg.LinAlgError, ValueError) as exc:
+            print(f"Lag {lag} did not estimate: {exc}")
+            continue
+        rows.append(
+            {
+                "lag": lag,
+                "k_ar_diff": lag - 1,
+                "coint_rank": rank,
+                "portmanteau_lags": test_lags,
+                "portmanteau_p": port_p,
+                "bg_lags": test_lags,
+                "bg_p": bg_p,
+                "clears_5": port_p >= 0.05 and bg_p >= 0.05,
+            }
+        )
+        if lag != bic_lag:
+            johansen_parts.append(johansen.assign(lag_basis="serial"))
+    if not rows:
+        raise DownloadError("No lag produced a VECM for the serial-correlation search.")
+    tested = pd.DataFrame(rows)
+    tested.to_csv(TABLES / "var_serial_correlation.csv", index=False)
+    clear = tested.loc[tested["clears_5"]]
+    if not clear.empty:
+        chosen = clear.sort_values("lag").iloc[0]
+        rule = "smallest lag at which the adjusted Portmanteau and Breusch-Godfrey tests both fail to reject at 5%"
+    else:
+        tested["min_p"] = tested[["portmanteau_p", "bg_p"]].min(axis=1)
+        chosen = tested.sort_values(["min_p", "lag"], ascending=[False, True]).iloc[0]
+        rule = "no lag cleared both tests at 5%; this is the lag with the larger minimum p-value"
+    # Recompute rank at the chosen lag from the trace test, including rank 0.
+    chosen_lag = int(chosen["lag"])
+    chosen_johansen = johansen_table(y, chosen_lag - 1)
+    rank = cointegrating_rank(chosen_johansen, "trace_rejects_5")
+    spec = {
+        "lag": chosen_lag,
+        "k_ar_diff": chosen_lag - 1,
+        "coint_rank": rank,
+        "deterministic": "ci" if rank >= 1 else "co",
+        "bic_lag": bic_lag,
+        "portmanteau_lags": int(chosen["portmanteau_lags"]),
+        "portmanteau_p": float(chosen["portmanteau_p"]),
+        "bg_lags": int(chosen["bg_lags"]),
+        "bg_p": float(chosen["bg_p"]),
+        "rule": rule,
+    }
+    if not johansen_parts:
+        johansen_parts.append(chosen_johansen.assign(lag_basis="serial"))
+    print(
+        f"Serial-correlation lag: {chosen_lag} (BIC lag {bic_lag}). "
+        f"Portmanteau p={spec['portmanteau_p']:.3f}, Breusch-Godfrey p={spec['bg_p']:.3f}. "
+        f"Trace rank {rank}. {rule}."
+    )
+    return spec, pd.concat(johansen_parts, ignore_index=True)
+
+
 def johansen_table(y: pd.DataFrame, k_ar_diff: int) -> pd.DataFrame:
     # det_order 0: a constant in the cointegrating relation. The series drift,
     # but a linear trend in the VECM would put a quadratic trend in the levels.
@@ -790,19 +1311,24 @@ def print_recommendation(
     diff_lags: pd.DataFrame,
     johansen: pd.DataFrame | None,
     has_commodity: bool,
+    spec: dict | None = None,
 ) -> None:
     start, end = frame["quarter"].iloc[0], frame["quarter"].iloc[-1]
     print()
     print("=" * 72)
     print(f"Estimation sample: {start} to {end} ({len(frame)} quarters).")
-    print("Malaysia trade: DOSM seasonally adjusted GDP by expenditure,")
-    print("  constant 2015 prices, exports (e5) and imports (e6), RM million.")
-    print("  Already real and already seasonally adjusted, so they were not deflated")
-    print("  and STL was not applied again.")
+    print("Malaysia trade: OpenDOSM monthly exports and imports of goods, nominal RM,")
+    print("  divided by the headline CPI (division 'overall'), summed to quarters, then STL.")
+    print("  The CPI is a consumer price index, not a trade price index. The series is")
+    print("  goods only, not national-accounts goods and services. DOSM monthly trade")
+    print("  starts in 2000, so no BNM splice was used.")
     print("REER: BIS broad real index, quarterly average of the monthly series, then STL.")
-    print("Foreign GDP: US and Japan from OECD QNA (already SA); EU27 from Eurostat")
-    print("  (already SA); Singapore from SingStat M015662 (already SA); China from")
-    print("  OECD constant-price NSA levels, then STL. No pre-2011 backcast.")
+    print("Foreign GDP: US from BEA Table 1.1.6 (already SA, through 2026Q2); Japan from")
+    print("  the Cabinet Office real SA series (through 2026Q2); EU27 from Eurostat;")
+    print("  Singapore from SingStat M015662. China is an index of official real")
+    print("  GDP growth: OECD seasonally adjusted rates through 2024Q1, then NBS")
+    print("  current-quarter preceding-year indices through the latest NBS quarter.")
+    print("No partner was dropped from the trade-weighted index. Weights are unchanged.")
     print("TPU: tpuq_published. The recomputed monthly mean is not in the model.")
     print("Weights (mean export share of world exports, 2000-2019, then rescaled to 1):")
     for _, row in weights.iterrows():
@@ -833,19 +1359,30 @@ def print_recommendation(
         f"levels AIC {raw_l['aic']}, BIC {raw_l['bic']}, HQ {raw_l['hq']}; "
         f"differences AIC {raw_d['aic']}, BIC {raw_d['bic']}, HQ {raw_d['hq']}."
     )
-    print(
-        "Where that minimum is the longest computed lag, the residual covariance is "
-        "nearly singular and the information criterion is not a usable lag choice."
-    )
+    longest = int(level_lags["lag"].max())
+    if any(raw_l[name] == longest for name in raw_l):
+        print(
+            "Where that minimum is the longest computed lag, the residual covariance is "
+            "nearly singular and the information criterion is not a usable lag choice."
+        )
     print(
         f"Lags that leave at least {MIN_RESIDUAL_DF} residual degrees of freedom: "
         f"levels AIC {aic_l}, BIC {bic_l}, HQ {hq_l}; "
         f"differences AIC {aic_d}, BIC {bic_d}, HQ {hq_d}."
     )
     print(
-        f"The lag used below is the BIC lag from that restricted set "
-        f"({len(frame)} quarters)."
+        f"The BIC lag, among lags with at least {MIN_RESIDUAL_DF} residual degrees of freedom, "
+        f"is {bic_l}. The lag used in the VECM is the one that clears residual serial "
+        "correlation when such a lag exists."
     )
+    if spec is not None:
+        print(
+            f"Chosen lag: {int(spec['lag'])} in levels ({int(spec['k_ar_diff'])} lagged "
+            f"difference(s)), trace rank {int(spec['coint_rank'])}. "
+            f"At that lag the adjusted Portmanteau p-value is {float(spec['portmanteau_p']):.3f} "
+            f"and the Breusch-Godfrey p-value is {float(spec['bg_p']):.3f}."
+        )
+        print(spec["rule"])
     print()
     if johansen is None:
         unresolved = [name for name, order in orders.items() if order != "I(1)"]
@@ -856,10 +1393,18 @@ def print_recommendation(
         )
         print(f"A levels VAR is appropriate for any series read as I(0). Chosen lag by BIC: {bic_l}.")
         return
-    bic_rows = johansen.loc[johansen["lag_basis"] == "bic"]
-    trace_rank = cointegrating_rank(bic_rows, "trace_rejects_5")
-    eigen_rank = cointegrating_rank(bic_rows, "max_eigen_rejects_5")
-    k_diff = int(bic_rows["k_ar_diff"].iloc[0])
+    bic_rows = johansen.loc[johansen["lag_basis"] == "bic"] if johansen is not None else pd.DataFrame()
+    if spec is not None and not bic_rows.empty:
+        k_diff = int(spec["k_ar_diff"])
+        trace_rank = int(spec["coint_rank"])
+        eigen_rows = johansen.loc[johansen["k_ar_diff"] == k_diff]
+        eigen_rank = cointegrating_rank(eigen_rows, "max_eigen_rejects_5") if not eigen_rows.empty else trace_rank
+    elif not bic_rows.empty:
+        trace_rank = cointegrating_rank(bic_rows, "trace_rejects_5")
+        eigen_rank = cointegrating_rank(bic_rows, "max_eigen_rejects_5")
+        k_diff = int(bic_rows["k_ar_diff"].iloc[0])
+    else:
+        return
     print(
         f"Johansen on log exports, log imports, and log REER, "
         f"{k_diff} lagged difference(s), constant in the cointegrating relation."
@@ -878,8 +1423,8 @@ def print_recommendation(
             f"relation(s), so differencing all three series would drop that long-run link."
         )
         print(
-            f"Chosen lag: {bic_l} in the levels VAR, which is {k_diff} lagged "
-            "difference(s) in the VECM. Foreign GDP, TPU, and the COVID and trade-war "
+            f"Chosen lag: {int(spec['lag']) if spec is not None else bic_l} in the levels VAR, which is {k_diff} lagged "
+            "difference(s) in the VECM. Foreign GDP, TPU, and the GFC, COVID and trade-war "
             "dummies stay outside the cointegrating relation as exogenous regressors."
         )
     else:
@@ -901,22 +1446,17 @@ def print_manual_gaps(frame: pd.DataFrame) -> None:
     end = frame["quarter"].iloc[-1]
     print()
     print("=" * 72)
-    print("MANUAL DOWNLOAD - sample does not start in 2000Q1")
-    print("What is missing: Malaysia real exports and imports of goods and services,")
-    print("  quarterly, constant 2015 prices, seasonally adjusted, 2000Q1 through 2014Q4.")
-    print("OpenDOSM's constant-2015 SA expenditure file starts in 2015Q1.")
-    print("Download from: DOSM quarterly GDP by expenditure, historical constant-price")
-    print("  series (the time-series table in the quarterly GDP release), or request it")
-    print("  from data@dosm.gov.my. Do not use the older 2005-price or 2010-price vintages")
-    print("  in the same file as the 2015-price series.")
-    print("Save as: data/raw/dosm_gdp_real_sa_2000_2014.csv")
-    print("Columns: date (YYYY-MM-DD, first month of the quarter), exports, imports.")
-    print("Units: RM million, constant 2015 prices, seasonally adjusted.")
-    print(f"This run estimated {start} to {end} and did not backcast the missing years.")
-    print("Re-run python src/var_data.py after saving the file. Quarters before 2015Q1")
-    print("  are prepended only if exports and imports are strictly positive and the")
-    print("  quarters are continuous.")
-    print()
+    if pd.Period(start, freq="Q-DEC") <= pd.Period("2000Q1", freq="Q-DEC"):
+        print(f"The estimation sample is {start} to {end}.")
+        print("Malaysian trade is CPI-deflated nominal goods trade from 2000, so no")
+        print("  constant-2015 historical file was required.")
+        print()
+    else:
+        print("MANUAL DOWNLOAD - sample does not start in 2000Q1")
+        print("What is missing: Malaysia real exports and imports of goods and services,")
+        print("  quarterly, before the first quarter now in the file.")
+        print(f"This run estimated {start} to {end}.")
+        print()
     if not COMMODITY_FILE.exists():
         print("MANUAL DOWNLOAD - optional, left out of this file")
         print("What is missing: IMF Primary Commodity Price index PALLFNF")

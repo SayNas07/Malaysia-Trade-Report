@@ -1,14 +1,15 @@
 variable,source,unit,seasonal_adjustment,sample
-exports_real_sa,DOSM gdp_qtr_real_sa_demand type e5,"RM million, constant 2015, already SA",used as published,2015Q1 to 2024Q1
-imports_real_sa,DOSM gdp_qtr_real_sa_demand type e6,"RM million, constant 2015, already SA",used as published,2015Q1 to 2024Q1
-reer_sa,"BIS broad real effective exchange rate, Malaysia","index, 2020=100 in the monthly source","quarterly mean, then STL",2015Q1 to 2024Q1
-gdp_us,"OECD QNA, USA, B1GQ, XDC, chain-linked volume, SA",national currency,already SA,2015Q1 to 2024Q1
-gdp_japan,"OECD QNA, JPN, B1GQ, XDC, chain-linked volume, SA",national currency,already SA,2015Q1 to 2024Q1
-gdp_china_sa,"OECD QNA, CHN, B1GQ, XDC, constant prices, NSA",million CNY,STL,2015Q1 to 2024Q1
-gdp_singapore,SingStat M015662 total GDP,"million chained 2015 SGD, already SA",already SA,2015Q1 to 2024Q1
-gdp_eu27,Eurostat namq_10_gdp EU27_2020 B1GQ CLV15_MEUR SCA,"million chain-linked 2015 euros, SA",already SA,2015Q1 to 2024Q1
-foreign_gdp_index,Fixed 2000-2019 COMTRADE export-share weights,100 in the first estimation quarter,weighted sum of log real GDP,2015Q1 to 2024Q1
-tpu,Caldara-Iacoviello tpuq_published,index,"official quarterly series, not re-averaged",2015Q1 to 2024Q1
-dummy_gfc,2008Q4-2009Q2,0/1,zero throughout a sample that starts in 2015,2015Q1 to 2024Q1
-dummy_covid,2020Q1-2020Q3,0/1,,2015Q1 to 2024Q1
-dummy_trade_war,2018Q3 onward,0/1 step,,2015Q1 to 2024Q1
+exports_real_sa,"OpenDOSM monthly goods exports, deflated by headline CPI, then STL","nominal RM / CPI index, quarterly sum",STL,2000Q1 to 2026Q2
+imports_real_sa,"OpenDOSM monthly goods imports, deflated by headline CPI, then STL","nominal RM / CPI index, quarterly sum",STL,2000Q1 to 2026Q2
+exports_real_usd_sa,"Same goods trade in USD (EXMAUS), deflated by US CPI, then STL","USD / CPIAUCSL, quarterly sum",STL; 2025Q4 left out where US CPI is missing,2000Q1 to 2026Q2
+reer_sa,"BIS broad real effective exchange rate, Malaysia","index, 2020=100 in the monthly source","quarterly mean, then STL",2000Q1 to 2026Q2
+gdp_us,"BEA NIPA Table 1.1.6 line 1, A191RX","millions of chained 2017 dollars, SAAR",already SA,2000Q1 to 2026Q2
+gdp_japan,"Cabinet Office ESRI gaku-jk2621, Apr-Jun 2026 first preliminary",billions of chained 2020 yen,already SA,2000Q1 to 2026Q2
+gdp_china_sa,"OECD QNA SA growth index through 2024Q1, then NBS y/y indices","index, 2011Q1=100, not yuan","official growth rates, not STL",2000Q1 to 2026Q2
+gdp_singapore,SingStat M015662 total GDP,"million chained 2015 SGD, already SA",already SA,2000Q1 to 2026Q2
+gdp_eu27,Eurostat namq_10_gdp EU27_2020 B1GQ CLV15_MEUR SCA,"million chain-linked 2015 euros, SA",already SA,2000Q1 to 2026Q2
+foreign_gdp_index,Fixed 2000-2019 COMTRADE export-share weights,100 in the first estimation quarter,weighted sum of log real GDP,2000Q1 to 2026Q2
+tpu,Caldara-Iacoviello tpuq_published,index,"official quarterly series, not re-averaged",2000Q1 to 2026Q2
+dummy_gfc,2008Q4-2009Q2,0/1,varies in this sample,2000Q1 to 2026Q2
+dummy_covid,2020Q1-2020Q3,0/1,,2000Q1 to 2026Q2
+dummy_trade_war,2018Q3 onward,0/1 step,,2000Q1 to 2026Q2
