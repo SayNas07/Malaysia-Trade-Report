@@ -10,6 +10,7 @@ gdp_singapore,SingStat M015662 total GDP,"million chained 2015 SGD, already SA",
 gdp_eu27,Eurostat namq_10_gdp EU27_2020 B1GQ CLV15_MEUR SCA,"million chain-linked 2015 euros, SA",already SA,2000Q1 to 2026Q2
 foreign_gdp_index,Fixed 2000-2019 COMTRADE export-share weights,100 in the first estimation quarter,weighted sum of log real GDP,2000Q1 to 2026Q2
 tpu,Caldara-Iacoviello tpuq_published,index,"official quarterly series, not re-averaged",2000Q1 to 2026Q2
+commodity_sa,"FRED PALLFNFINDEXQ, IMF all-commodity price index","index, quarterly","published quarterly index, not seasonally adjusted",2000Q1 to 2026Q2
 dummy_gfc,2008Q4-2009Q2,0/1,varies in this sample,2000Q1 to 2026Q2
 dummy_covid,2020Q1-2020Q3,0/1,,2000Q1 to 2026Q2
 dummy_trade_war,2018Q3 onward,0/1 step,,2000Q1 to 2026Q2

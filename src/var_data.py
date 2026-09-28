@@ -887,6 +887,27 @@ def export_weights() -> pd.DataFrame:
 
 
 def load_commodity() -> pd.Series | None:
+    fred = RAW / "commodity_prices_fred.csv"
+    if fred.exists():
+        frame = pd.read_csv(fred)
+        if "observation_date" not in frame.columns or "PALLFNFINDEXQ" not in frame.columns:
+            raise DownloadError(
+                "commodity_prices_fred.csv needs columns observation_date and PALLFNFINDEXQ."
+            )
+        frame = frame.dropna(subset=["observation_date", "PALLFNFINDEXQ"]).copy()
+        frame["quarter"] = pd.PeriodIndex(pd.to_datetime(frame["observation_date"]), freq="Q-DEC")
+        if frame["quarter"].duplicated().any():
+            raise DownloadError("commodity_prices_fred.csv has a duplicated quarter. It was not averaged.")
+        series = frame.set_index("quarter")["PALLFNFINDEXQ"].astype(float).sort_index()
+        series = require_regular(series[series.index < DROP_FROM], "IMF PALLFNF quarterly index")
+        log_download(
+            "FRED PALLFNFINDEXQ, IMF all-commodity price index, quarterly",
+            fred,
+            quarter_range(series),
+            len(series),
+            "Published quarterly index. Not seasonally adjusted and not interpolated.",
+        )
+        return series
     if not COMMODITY_FILE.exists():
         return None
     frame = pd.read_csv(COMMODITY_FILE)
@@ -987,6 +1008,16 @@ def write_sources(frame: pd.DataFrame) -> None:
         ("dummy_covid", "2020Q1-2020Q3", "0/1", ""),
         ("dummy_trade_war", "2018Q3 onward", "0/1 step", ""),
     ]
+    if "log_commodity" in frame.columns:
+        rows.insert(
+            -3,
+            (
+                "commodity_sa",
+                "FRED PALLFNFINDEXQ, IMF all-commodity price index",
+                "index, quarterly",
+                "published quarterly index, not seasonally adjusted",
+            ),
+        )
     table = pd.DataFrame(rows, columns=["variable", "source", "unit", "seasonal_adjustment"])
     table["sample"] = f"{start} to {end}"
     table.to_csv(TABLES / "var_sources.csv", index=False)
@@ -1338,6 +1369,9 @@ def print_recommendation(
         )
     if not has_commodity:
         print("Commodity price index: not in the file. See the manual-download note.")
+    else:
+        print("Commodity prices: FRED PALLFNFINDEXQ, the IMF all-commodity index,")
+        print("  quarterly as published. Entered in logs. Not seasonally adjusted.")
     print()
     print("Integration order from the ADF at 5% (constant and trend in levels,")
     print("  constant only in differences; TPU has a constant and no trend):")
@@ -1457,7 +1491,7 @@ def print_manual_gaps(frame: pd.DataFrame) -> None:
         print("  quarterly, before the first quarter now in the file.")
         print(f"This run estimated {start} to {end}.")
         print()
-    if not COMMODITY_FILE.exists():
+    if "log_commodity" not in frame.columns:
         print("MANUAL DOWNLOAD - optional, left out of this file")
         print("What is missing: IMF Primary Commodity Price index PALLFNF")
         print("  (all commodities, fuel and non-fuel), monthly, index 2016=100.")

@@ -1,5 +1,5 @@
 test,lags,statistic,df,pvalue,crit_5,note
-Portmanteau,4.0,24.431690955172122,33,0.8596641048315432,47.39988391908093,
-Breusch-Godfrey LM,4.0,41.15942037600775,36,0.2549536978137591,50.99846016571065,
-Jarque-Bera,,119.55219616386677,6,2.0235952265198868e-23,12.591587243743977,
-Companion roots,,0.5567772098080579,2,,,"2 roots lie on the unit circle, against 2 expected for rank 1 among 3 variables. The largest other modulus is 0.557."
+Portmanteau,4.0,30.299429200346044,33,0.6022582644911799,47.39988391908093,
+Breusch-Godfrey LM,4.0,55.38121714123709,36,0.020466821940209892,50.99846016571065,
+Jarque-Bera,,282.26293339190073,6,5.149377943663814e-58,12.591587243743977,
+Companion roots,,0.5689580545635998,2,,,"2 roots lie on the unit circle, against 2 expected for rank 1 among 3 variables. The largest other modulus is 0.569."

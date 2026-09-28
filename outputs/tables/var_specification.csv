@@ -1,2 +1,2 @@
 lag,k_ar_diff,coint_rank,deterministic,bic_lag,portmanteau_lags,portmanteau_p,bg_lags,bg_p,rule
-1,0,1,ci,1,4,0.8596641048315203,4,0.2549536978137421,smallest lag at which the adjusted Portmanteau and Breusch-Godfrey tests both fail to reject at 5%
+1,0,1,ci,1,4,0.6022582644912753,4,0.020466821940290498,no lag cleared both tests at 5%; this is the lag with the larger minimum p-value

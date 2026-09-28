@@ -28,6 +28,11 @@ import statsmodels.api as sm
 from scipy import stats
 from statsmodels.tsa.vector_ar.vecm import VECM
 
+try:
+    from ardl_demand import estimate as estimate_ardl
+except ImportError:
+    from src.ardl_demand import estimate as estimate_ardl
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "processed" / "var_quarterly.csv"
 TABLES = ROOT / "outputs" / "tables"
@@ -43,12 +48,20 @@ ENDOG_LABEL = {
     "log_exports": "exports",
     "log_imports": "imports",
 }
-BASE_EXOG = ["log_foreign_gdp", "tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"]
+BASE_EXOG = [
+    "log_foreign_gdp",
+    "tpu",
+    "log_commodity",
+    "dummy_gfc",
+    "dummy_covid",
+    "dummy_trade_war",
+]
 EXOG_LABEL = {
     "log_foreign_gdp": "foreign GDP",
     "log_gdp_us": "US GDP",
     "log_gdp_china": "China GDP",
     "tpu": "TPU",
+    "log_commodity": "commodity prices",
     "dummy_covid": "COVID",
     "dummy_trade_war": "trade war",
     "dummy_gfc": "GFC",
@@ -84,7 +97,10 @@ def main() -> int:
     LM_LAGS = int(spec["bg_lags"])
 
     frame = load_frame()
-    short_exog = varying(frame, BASE_EXOG)
+    if "log_commodity" not in frame.columns:
+        raise RuntimeError("log_commodity is missing. Run python src/var_data.py after adding commodity prices.")
+    estimate_ardl(frame)
+    short_exog = varying(frame, [column for column in BASE_EXOG if column in frame.columns])
     coint_cols = ["log_foreign_gdp"]
     restricted_exog = [column for column in short_exog if column not in coint_cols]
 
@@ -111,6 +127,7 @@ def main() -> int:
     episodes = save_episodes(frame, restricted, restricted_exog, coefficients, coint_cols)
     projections = save_local_projections(frame, shock_scale)
     robustness, long_run = save_robustness(frame, point)
+    save_without_commodity(frame, coint_cols, shock_scale)
 
     plot_responses(point, bands)
     plot_fevd(result=None)
@@ -712,6 +729,56 @@ def save_fevd(result, path: Path | None = None) -> pd.DataFrame:
     return table
 
 
+def save_without_commodity(frame: pd.DataFrame, coint_cols: list[str], shock_scale: dict[str, float]) -> None:
+    """Same VECM with commodity prices left out, for the comparison."""
+    short_cols = varying(
+        frame,
+        [column for column in BASE_EXOG if column != "log_commodity" and column in frame.columns],
+        "the VECM without commodity prices",
+    )
+    restricted_cols = [column for column in short_cols if column not in coint_cols]
+    short = fit_vecm(frame, short_cols)
+    restricted = fit_vecm(frame, restricted_cols, coint_cols)
+    relation = normalised_relation(restricted, coint_cols, "without_commodity")
+    relation.to_csv(TABLES / "var_long_run_no_commodity.csv", index=False)
+    short_coef = save_coefficients(short, short_cols)
+    restricted_paths = response_paths(restricted, restricted_cols, shock_scale, coint_cols)
+    short_paths = response_paths(short, short_cols, shock_scale)
+    rows = []
+    for name in ("exports on foreign GDP", "imports on foreign GDP"):
+        matched = short_coef.loc[short_coef["name"] == name]
+        if matched.empty:
+            continue
+        row = matched.iloc[0]
+        rows.append(
+            {
+                "specification": "short_run",
+                "name": name,
+                "impact_percent": np.nan,
+                "horizon_1_percent": np.nan,
+                "horizon_4_percent": np.nan,
+                "estimate": float(row["estimate"]),
+                "pvalue": float(row["pvalue"]),
+            }
+        )
+    for specification, paths in (("restricted", restricted_paths), ("short_run", short_paths)):
+        for shock in ("log_foreign_gdp", "log_reer", "tpu"):
+            path = paths[f"log_exports__{shock}"]
+            label = EXOG_LABEL.get(shock, ENDOG_LABEL.get(shock, shock))
+            rows.append(
+                {
+                    "specification": specification,
+                    "name": f"exports after {label}",
+                    "impact_percent": to_percent(path[0]),
+                    "horizon_1_percent": to_percent(path[1]),
+                    "horizon_4_percent": to_percent(path[4]),
+                    "estimate": np.nan,
+                    "pvalue": np.nan,
+                }
+            )
+    pd.DataFrame(rows).to_csv(TABLES / "var_no_commodity.csv", index=False)
+
+
 def save_episodes(
     frame: pd.DataFrame,
     result,
@@ -761,18 +828,28 @@ def save_episodes(
     dummy_table.to_csv(TABLES / "var_episode_dummies.csv", index=False)
 
     forecasts = {}
+    controls = [column for column in (
+        "log_foreign_gdp", "tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war",
+    ) if column in frame.columns]
     forecasts["COVID"] = episode_forecast(
         frame,
         start="2020Q1",
-        end="2021Q4",
-        exog_cols=["log_foreign_gdp", "tpu", "dummy_gfc", "dummy_trade_war"],
+        end="2022Q4",
+        exog_cols=[column for column in controls if column != "dummy_covid"],
+        coint_cols=coint_cols,
+    )
+    forecasts["COVID, no commodity"] = episode_forecast(
+        frame,
+        start="2020Q1",
+        end="2022Q4",
+        exog_cols=[column for column in controls if column not in ("dummy_covid", "log_commodity")],
         coint_cols=coint_cols,
     )
     forecasts["trade war"] = episode_forecast(
         frame,
         start="2018Q3",
         end="2019Q4",
-        exog_cols=["log_foreign_gdp", "tpu", "dummy_gfc"],
+        exog_cols=[column for column in controls if column != "dummy_trade_war"],
         coint_cols=coint_cols,
     )
     if frame["quarter"].iloc[0] <= pd.Period("2008Q3", freq="Q-DEC"):
@@ -780,7 +857,7 @@ def save_episodes(
             frame,
             start="2008Q4",
             end="2009Q2",
-            exog_cols=["log_foreign_gdp", "tpu"],
+            exog_cols=[column for column in controls if column != "dummy_gfc"],
             coint_cols=coint_cols,
         )
     else:
@@ -875,6 +952,8 @@ def projection_at(indexed, shock, innovations, horizon: int, shock_name_col: str
         "lag_export_growth": indexed["log_exports"].diff().shift(1),
         "lag_reer_growth": indexed["log_reer"].diff().shift(1),
     }
+    if "log_commodity" in indexed.columns:
+        controls["commodity"] = indexed["log_commodity"].diff()
     other = "tpu" if shock_name_col == "log_foreign_gdp" else "log_foreign_gdp"
     controls["other_shock"] = innovations[other]
     controls["gfc"] = indexed["dummy_gfc"]
@@ -916,31 +995,31 @@ def save_robustness(frame: pd.DataFrame, restricted_paths: dict[str, np.ndarray]
     specs = {
         "restricted": (
             frame,
-            ["tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
+            ["tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
             ["log_foreign_gdp"],
             restricted_paths,
         ),
         "short_run": (
             frame,
-            ["log_foreign_gdp", "tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
+            ["log_foreign_gdp", "tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
             [],
             None,
         ),
         "us_china": (
             frame,
-            ["tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
+            ["tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
             ["log_gdp_us", "log_gdp_china"],
             None,
         ),
         "through_2019Q4": (
             frame[frame["quarter"] <= pd.Period("2019Q4", freq="Q-DEC")].copy(),
-            ["tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
+            ["tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
             ["log_foreign_gdp"],
             None,
         ),
         "usd_cpi": (
             usd_trade_sample(frame),
-            ["tpu", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
+            ["tpu", "log_commodity", "dummy_gfc", "dummy_covid", "dummy_trade_war"],
             ["log_foreign_gdp"],
             None,
         ),
@@ -1037,7 +1116,7 @@ def plot_fevd(result) -> None:
 
 
 def plot_counterfactuals(episodes: dict) -> None:
-    forecasts = {name: payload for name, payload in episodes["forecasts"].items() if payload.get("ok")}
+    forecasts = {name: payload for name, payload in episodes["forecasts"].items() if payload.get("ok") and "no commodity" not in name}
     if not forecasts:
         return
     fig, axes = plt.subplots(1, len(forecasts), figsize=(5.2 * len(forecasts), 4), squeeze=False)
@@ -1138,32 +1217,45 @@ def write_summary(
     lines = [
         "# Malaysian trade and external shocks",
         "",
-        f"The estimates use a VECM on {start} to {end} ({len(frame)} quarters). "
-        "Log CPI-deflated goods exports, log CPI-deflated goods imports, and the log real "
-        "effective exchange rate are endogenous. "
-        f"The lag and rank are those selected for this file: {int(result.coint_rank)} cointegrating "
-        f"relation and {int(result.k_ar - 1)} lagged differences. Two placements of foreign GDP "
-        "are estimated. In the short-run specification it is an unrestricted regressor, outside "
-        "the cointegrating relation. In the restricted specification it is weakly exogenous: it "
-        "enters the cointegrating relation only, lagged one quarter, and it has no equation of "
-        "its own. TPU and the GFC, COVID, and trade-war dummies stay outside the relation in both. "
+        f"Long-run trade elasticities come from single-equation ARDL models on {start} to {end} "
+        f"({len(frame)} quarters). Shock dynamics come from a VECM on the same sample. "
+        "The cointegrating relation estimated without commodity prices is dominated by the link "
+        "between exports and imports: Malaysia imports intermediates and re-exports them, so "
+        "imports absorb foreign demand and the foreign-GDP coefficient in that relation is not "
+        "an export-demand elasticity. "
+        "Export demand therefore excludes imports. Import demand includes exports. "
+        "Log commodity prices (the IMF all-commodity index, PALLFNFINDEXQ) enter both demand "
+        "equations and the VECM as an exogenous control, because dividing nominal trade by the "
+        "consumer price index turns commodity-price swings into movements that look like volume. "
+        "The GFC, COVID, and trade-war dummies are short-run regressors. "
+        f"The VECM uses the lag and rank selected for this file: {int(result.coint_rank)} "
+        f"cointegrating relation and {int(result.k_ar - 1)} lagged differences. "
+        f"{lag_sentence()} "
         "Malaysia is treated as a small open economy that does not move partner GDP.",
         "",
         series_note(),
         "",
-        "## Short-run specification",
+        "## Long-run elasticities",
+        "",
+        ardl_paragraph(),
+        "",
+        "## Shock dynamics",
         "",
         (
-            f"With foreign GDP outside the cointegrating relation, the short-run elasticity of "
-            f"exports is {export_gdp[0]:.2f} ({p_text(export_gdp[1])}) and the short-run elasticity "
-            f"of imports is {import_gdp[0]:.2f} ({p_text(import_gdp[1])}). These are same-quarter "
-            "coefficients. They are not long-run trade elasticities. "
+            "Commodity prices stay outside the cointegrating relation. Two placements of foreign "
+            "GDP are still estimated. In the short-run specification it is an unrestricted "
+            "regressor. In the restricted specification it is weakly exogenous: it enters the "
+            "cointegrating relation only, lagged one quarter. TPU, commodity prices, and the "
+            "episode dummies stay outside the relation in both. "
+            f"With foreign GDP outside the relation, the same-quarter elasticity of exports is "
+            f"{export_gdp[0]:.2f} ({p_text(export_gdp[1])}) and of imports is "
+            f"{import_gdp[0]:.2f} ({p_text(import_gdp[1])}). "
             f"The largest companion root inside the unit circle has modulus {transient:.2f}."
         ),
         "",
-        "## Restricted specification",
-        "",
         restricted_paragraph(long_run),
+        "",
+        without_commodity_paragraph(),
         "",
         response_paragraph(point, bands, shock_scale),
         "",
@@ -1173,7 +1265,8 @@ def write_summary(
         "",
         "## Shock episodes",
         "",
-        "The episode estimates below are from the restricted specification. " + episode_paragraph(episodes),
+        "The episode estimates below are from the restricted VECM with commodity prices included. "
+        + episode_paragraph(episodes),
         "",
         "## Robustness",
         "",
@@ -1183,9 +1276,9 @@ def write_summary(
         "",
         diagnostic_paragraph(diagnostics, result, n_boot),
         "",
-        "## Which specification is preferred",
+        "## What each model is for",
         "",
-        preference_paragraph(long_run),
+        role_paragraph(),
         "",
         "## Caveats",
         "",
@@ -1193,6 +1286,27 @@ def write_summary(
         "",
     ]
     SUMMARY.write_text("\n".join(lines), encoding="utf-8")
+
+
+def lag_sentence() -> str:
+    spec = pd.read_csv(TABLES / "var_specification.csv").iloc[0]
+    if "no lag cleared" not in str(spec["rule"]):
+        return (
+            f"At that lag the adjusted Portmanteau p-value is {float(spec['portmanteau_p']):.3f} "
+            f"and the Breusch-Godfrey p-value is {float(spec['bg_p']):.3f}."
+        )
+    return (
+        "No lag from 1 to 12 clears both residual-correlation tests once commodity prices "
+        f"are in the exogenous set. Lag {int(spec['lag'])} is the one with the higher minimum "
+        f"p-value (Portmanteau {float(spec['portmanteau_p']):.3f}, "
+        f"Breusch-Godfrey {float(spec['bg_p']):.3f})."
+    )
+
+
+def join_and(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def series_note() -> str:
@@ -1222,6 +1336,126 @@ def series_note() -> str:
         f"and the largest gap is {float(gap.difference_points):+.2f} points in {gap.quarter}. "
         "The USD check converts the same nominal goods trade at EXMAUS and deflates by US CPI. "
         "CPIAUCSL is missing October 2025, so 2025Q4 is incomplete and that check stops before the gap."
+    )
+
+
+def ardl_paragraph() -> str:
+    bounds = pd.read_csv(TABLES / "ardl_bounds.csv").set_index("equation")
+    long_run = pd.read_csv(TABLES / "ardl_long_run.csv")
+    diagnostics = pd.read_csv(TABLES / "ardl_diagnostics.csv").set_index("equation")
+    labels = {
+        "log_foreign_gdp": "foreign GDP",
+        "log_reer": "the REER",
+        "log_commodity": "commodity prices",
+        "log_exports": "exports",
+        "const": "the intercept",
+    }
+
+    def equation_text(key: str, title: str, regressors: str) -> str:
+        test = bounds.loc[key]
+        diag = diagnostics.loc[key]
+        slopes = long_run[(long_run["equation"] == key) & (long_run["variable"] != "ect")]
+        bits = []
+        for _, row in slopes.iterrows():
+            if row["variable"] in ("const", "intercept"):
+                continue
+            bits.append(
+                f"{labels.get(row['variable'], row['variable'])} {row['elasticity']:+.2f} "
+                f"(se {row['std_error']:.2f}, {p_text(row['p_value'])})"
+            )
+        ect = long_run[(long_run["equation"] == key) & (long_run["variable"] == "ect")].iloc[0]
+        ect_ok = float(ect["elasticity"]) < 0 and float(ect["p_value"]) < 0.05
+        ect_call = (
+            "negative and significant at 5%, so the levels error-correct"
+            if ect_ok
+            else "not a significant negative error correction at 5%"
+        )
+        bg_call = "does not reject" if diag["bg_pvalue"] >= 0.05 else "rejects"
+        normal_call = "does not reject" if diag["jarque_bera_pvalue"] >= 0.05 else "rejects"
+        decision = {
+            "cointegration": "rejects no cointegration",
+            "no cointegration": "does not reject no cointegration",
+            "inconclusive": "is inconclusive",
+        }[test["decision"]]
+        lag_word = "lag" if int(diag["lag"]) == 1 else "lags"
+        return (
+            f"{title} is an ARDL with {int(diag['lag'])} {lag_word} of every variable: {regressors}. "
+            f"The Pesaran bounds test (case {int(test['case'])}, unrestricted intercept and no trend) "
+            f"has F = {test['f_stat']:.2f}. The 5% critical bounds are {test['lower_05']:.2f} and "
+            f"{test['upper_05']:.2f}, so the test {decision}. "
+            f"The long-run elasticities are {'; '.join(bits)}. "
+            f"The error-correction coefficient is {ect['elasticity']:+.3f} "
+            f"(se {ect['std_error']:.3f}, {p_text(ect['p_value'])}) and is {ect_call}. "
+            f"Breusch-Godfrey at {int(diag['bg_lags'])} lags {bg_call} residual correlation "
+            f"(p={diag['bg_pvalue']:.3f}). Jarque-Bera {normal_call} normality "
+            f"(p={diag['jarque_bera_pvalue']:.3f}). The equation uses {int(test['nobs'])} observations."
+        )
+
+    export = equation_text(
+        "export_demand",
+        "Export demand",
+        "exports on foreign GDP, the REER, and commodity prices, with the GFC, COVID, and "
+        "trade-war dummies in the short run only. Imports are excluded",
+    )
+    imports = equation_text(
+        "import_demand",
+        "Import demand",
+        "imports on exports, the REER, and commodity prices, with the same dummies in the short run only",
+    )
+    return export + " " + imports
+
+
+def without_commodity_paragraph() -> str:
+    relation = pd.read_csv(TABLES / "var_long_run_no_commodity.csv")
+    paths = pd.read_csv(TABLES / "var_no_commodity.csv")
+    exports = relation[(relation["normalised_on"] == "exports")].set_index("name")
+    irf = paths[(paths["specification"] == "restricted") & (paths["name"] == "exports after foreign GDP")].iloc[0]
+    short = paths[(paths["specification"] == "short_run") & (paths["name"] == "exports on foreign GDP")].iloc[0]
+    return (
+        "The same restricted VECM without commodity prices, on this sample and this lag, has "
+        f"a partial long-run export elasticity to foreign GDP of {exports.loc['foreign GDP', 'elasticity']:.2f} "
+        f"({p_text(exports.loc['foreign GDP', 'pvalue'])}), an import weight of "
+        f"{exports.loc['imports', 'elasticity']:.2f}, and a foreign-GDP export response of "
+        f"{irf['impact_percent']:+.2f}% on impact and {irf['horizon_1_percent']:+.2f}% one quarter later. "
+        f"Its short-run export elasticity is {short['estimate']:.2f} ({p_text(short['pvalue'])}). "
+        "Those are the figures the commodity-price control is being compared with. "
+        "With commodity prices in the short-run equations the import coefficient in the solved "
+        "relation is no longer that 1.35 processing-trade weight, and its standard error is large "
+        "enough that the coefficient is not significant at 5%."
+    )
+
+
+def role_paragraph() -> str:
+    long_run = pd.read_csv(TABLES / "ardl_long_run.csv")
+    bounds = pd.read_csv(TABLES / "ardl_bounds.csv").set_index("equation")
+    ect = long_run[(long_run["equation"] == "export_demand") & (long_run["variable"] == "ect")].iloc[0]
+    decision = bounds.loc["export_demand", "decision"]
+    ect_ok = float(ect["elasticity"]) < 0 and float(ect["p_value"]) < 0.05
+    if decision == "cointegration" and ect_ok:
+        support = (
+            "The export-demand bounds test finds cointegration and the error-correction "
+            "coefficient is negative and significant, so those ARDL elasticities are the "
+            "long-run export-demand estimates."
+        )
+    elif ect_ok:
+        support = (
+            "The export error-correction coefficient is negative and significant. "
+            f"The bounds test is {decision.replace('_', ' ')}, so the long-run elasticities "
+            "are reported with that caveat."
+        )
+    else:
+        support = (
+            "The export error-correction coefficient is not a significant negative adjustment, "
+            "so the ARDL levels equation is not a confirmed long-run demand curve. The elasticities "
+            "are still the ones to read, because the VECM foreign-GDP coefficient is partialled "
+            "on imports."
+        )
+    return (
+        "The ARDL equations are the headline for long-run elasticities. The VECM is the model "
+        "for shock dynamics: impulse responses, the forecast-error decomposition, and the "
+        f"episode forecasts. {support} The VECM cointegrating vector still contains imports, "
+        "so its foreign-GDP coefficient remains a partial association inside the processing-trade "
+        "relation rather than an export-demand elasticity."
     )
 
 
@@ -1384,7 +1618,7 @@ def response_paragraph(point, bands, shock_scale: dict) -> str:
     later_text = (
         "After the impact quarter the export bands include zero."
         if not later
-        else "After the impact quarter the export band still excludes zero for " + ", ".join(later) + "."
+        else "After the impact quarter the export band still excludes zero for " + join_and(later) + "."
     )
     return (
         f"Scaled to a one-standard-deviation AR(1) innovation, the restricted-specification "
@@ -1480,6 +1714,7 @@ def episode_paragraph(episodes: dict) -> str:
     sentences.append(dummy_sentence(dummies, "COVID"))
     sentences.append(dummy_sentence(dummies, "trade war"))
     sentences.append(forecast_sentence(episodes["forecasts"]["COVID"], "COVID"))
+    sentences.append(commodity_gap_sentence(episodes["forecasts"]))
     sentences.append(forecast_sentence(episodes["forecasts"]["trade war"], "trade war"))
     return " ".join(sentences)
 
@@ -1491,13 +1726,41 @@ def dummy_sentence(dummies: pd.DataFrame, episode: str) -> str:
         row = part.loc[equation]
         call = "significant at 5%" if row["pvalue"] < 0.05 else "not significant at 5%"
         bits.append(
-            f"{equation} {to_percent(row['estimate']):+.1f}% (p={row['pvalue']:.3f}, {call})"
+            f"{equation} {to_percent(row['estimate']):+.1f}% ({p_text(row['pvalue'])}, {call})"
         )
     return (
         f"The {episode} dummy shifts quarterly log-growth while it equals one. "
         f"In percent, that shift is {'; '.join(bits)}. "
         "Error correction offsets a dummy that stays on, so these are not losses that "
         "compound quarter after quarter."
+    )
+
+
+def commodity_gap_sentence(forecasts: dict) -> str:
+    with_prices = forecasts.get("COVID")
+    without = forecasts.get("COVID, no commodity")
+    if not with_prices or not without or not with_prices.get("ok") or not without.get("ok"):
+        return "The commodity-price comparison of the 2021-22 export gap could not be estimated."
+    left = with_prices["path"].set_index("quarter")["gap_percent"]
+    right = without["path"].set_index("quarter")["gap_percent"]
+    window = [quarter for quarter in left.index if "2021Q1" <= quarter <= "2022Q4"]
+    gap_with = left.loc[window]
+    gap_without = right.loc[window]
+    mean_with = float(gap_with.mean())
+    mean_without = float(gap_without.mean())
+    if mean_without == 0:
+        share = "the no-commodity gap averages zero"
+    elif np.sign(mean_with) == np.sign(mean_without):
+        share = f"{100 * mean_with / mean_without:.0f}% of the no-commodity gap remains"
+    else:
+        share = "the gap changes sign once commodity prices are included"
+    peak = gap_with.abs().idxmax()
+    return (
+        "Both COVID forecasts run from 2020Q1 through 2022Q4. "
+        f"Over 2021Q1-2022Q4 the average gap between actual exports and the pre-COVID forecast "
+        f"is {mean_with:+.1f}% when commodity prices follow their actual path and "
+        f"{mean_without:+.1f}% when the same pre-COVID model omits commodity prices, so {share}. "
+        f"The largest remaining gap in that window is {gap_with.loc[peak]:+.1f}% in {peak}."
     )
 
 
@@ -1589,7 +1852,7 @@ def diagnostic_paragraph(diagnostics: pd.DataFrame, result, n_boot: int) -> str:
         f"Jarque-Bera {normal_call} normality (statistic {normal['statistic']:.1f}, "
         f"p={normal['pvalue']:.3f}). {roots['note']} "
         f"The residual bootstrap kept {n_boot} of {N_BOOT} draws. "
-        f"The log-likelihood is {float(result.llf):.1f} on {int(result.nobs)} estimation observations."
+        f"The log-likelihood is {float(np.real(result.llf)):.1f} on {int(result.nobs)} estimation observations."
     )
 
 
@@ -1602,7 +1865,10 @@ def caveat_paragraph(frame: pd.DataFrame, n_boot: int, shock_scale: dict) -> str
     return (
         f"The estimation sample has {len(frame)} quarters. "
         "The deflator is the headline consumer price index, so the real trade series is not a "
-        "constant-price national-accounts series. "
+        "constant-price national-accounts series. Log commodity prices are included so that "
+        "a rise in commodity prices is not read as a rise in trade volume. "
+        "The VECM still puts imports in the cointegrating relation, which is the "
+        "processing-trade link, and that coefficient is not used as the export-demand elasticity. "
         "KPSS did not reject stationarity of the three endogenous series in levels, so the "
         "unit-root reading is the ADF result and is not unanimous. "
         "The REER impulse response is a Cholesky shock with the exchange rate ordered first: "
