@@ -8,7 +8,7 @@ This project measures how concentrated Malaysia's goods trade is, and how export
 - World Bank World Development Indicators
 - Caldara and Iacoviello trade-policy uncertainty
 - OpenDOSM monthly goods trade and Malaysia's headline CPI
-- BIS broad real effective exchange rate
+- BIS broad real effective exchange rate 
 - Partner real GDP: BEA (United States), Cabinet Office (Japan), Eurostat (EU27), SingStat (Singapore), and OECD plus NBS growth rates (China)
 - FRED: the ringgit (EXMAUS), US CPI (CPIAUCSL), and the IMF all-commodity price index (PALLFNFINDEXQ)
 
